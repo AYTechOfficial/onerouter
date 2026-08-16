@@ -9,6 +9,7 @@ import { forwardWithFailover } from "./proxy";
 import {
   addProvider,
   deleteProvider,
+  ensureHydrated,
   getUnifiedKey,
   listProviders,
   toPublic,
@@ -43,8 +44,8 @@ async function readJson(req: Request): Promise<unknown> {
   }
 }
 
-function requireAuth(req: Request): boolean {
-  const expected = getUnifiedKey();
+async function requireAuth(req: Request): Promise<boolean> {
+  const expected = await getUnifiedKey();
   const header = req.headers.get("authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
   if (!token || token.length !== expected.length) return false;
@@ -69,7 +70,7 @@ function requestOrigin(_req: Request): string {
   return PUBLIC_ORIGIN;
 }
 
-function handleProvidersPost(body: unknown): Response {
+async function handleProvidersPost(body: unknown): Promise<Response> {
   const b = (body ?? {}) as Record<string, unknown>;
   const name = typeof b.name === "string" ? b.name.trim() : "";
   const baseUrl = typeof b.baseUrl === "string" ? b.baseUrl.trim() : "";
@@ -89,7 +90,7 @@ function handleProvidersPost(body: unknown): Response {
     throw new HttpError(400, "models must be an array of strings");
   }
 
-  const provider = addProvider({
+  const provider = await addProvider({
     name,
     baseUrl,
     apiKey,
@@ -116,7 +117,7 @@ function handleModelsGet(): Response {
 }
 
 async function handleChatCompletionsPost(req: Request): Promise<Response> {
-  if (!requireAuth(req)) return unauthorized();
+  if (!(await requireAuth(req))) return unauthorized();
   const body = await readJson(req);
   const b = (body ?? {}) as Record<string, unknown>;
   const model = typeof b.model === "string" ? b.model : "";
@@ -135,6 +136,17 @@ export async function handleGatewayRequest(req: Request): Promise<Response | nul
   const { pathname } = url;
   const method = req.method;
 
+  // Load the store before touching any state: local file on disk, or the single
+  // Upstash doc on serverless. A configured-but-unreachable remote fails loudly
+  // with a readable 500 rather than serving stale/empty state.
+  try {
+    await ensureHydrated();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[onerouter] store hydration failed:", message);
+    return jsonResponse(500, { error: { message } });
+  }
+
   try {
     if (pathname === "/api/providers") {
       if (method === "GET") return jsonResponse(200, { providers: listProviders().map(toPublic) });
@@ -145,23 +157,24 @@ export async function handleGatewayRequest(req: Request): Promise<Response | nul
     if (pathname.startsWith("/api/providers/") && method === "DELETE") {
       const id = decodeURIComponent(pathname.slice("/api/providers/".length));
       if (!id) return jsonResponse(400, { error: { message: "provider id is required" } });
-      return deleteProvider(id) ? new Response(null, { status: 204 }) : jsonResponse(404, { error: { message: "provider not found" } });
+      return (await deleteProvider(id)) ? new Response(null, { status: 204 }) : jsonResponse(404, { error: { message: "provider not found" } });
     }
 
     if (pathname === "/api/settings" && method === "GET") {
       return jsonResponse(200, {
         baseUrl: `${requestOrigin(req)}/v1`,
-        apiKey: getUnifiedKey(),
+        apiKey: await getUnifiedKey(),
         providerCount: listProviders().length,
       });
     }
 
     if (pathname === "/v1/models" && method === "GET") {
-      if (!requireAuth(req)) return unauthorized();
+      if (!(await requireAuth(req))) return unauthorized();
       return handleModelsGet();
     }
 
     if (pathname === "/v1/chat/completions" && method === "POST") {
+      if (!(await requireAuth(req))) return unauthorized();
       return await handleChatCompletionsPost(req);
     }
   } catch (err) {
