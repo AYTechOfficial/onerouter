@@ -14,13 +14,42 @@ There is no separate process or port.
 
 - `gateway/index.ts` — request router: config API + OpenAI-compatible proxy, auth
 - `gateway/store.ts` — provider store + unified key, persisted to
-  `.run/gateway/data.json` (dir 0700, file 0600, atomic tmp+rename writes)
+  `.run/gateway/data.json` locally or to Upstash Redis on serverless
+  (see "Persistence backends" below)
 - `gateway/proxy.ts` — upstream forwarding + automatic failover/retry loop
   (incl. SSE passthrough with mid-stream error handling)
 - `gateway/fallback.ts` — builds the ordered (provider, model) candidate chain
   for a request
-- `gateway/config.ts` — data paths, `ONEROUTER_PUBLIC_ORIGIN` override,
-  `MAX_ATTEMPTS`, `UPSTREAM_TIMEOUT_MS`
+- `gateway/config.ts` — data paths, `ONEROUTER_PUBLIC_ORIGIN` and Upstash env
+  vars, `MAX_ATTEMPTS`, `UPSTREAM_TIMEOUT_MS`
+
+## Persistence backends
+
+The whole state doc (all providers + the unified API key) lives under one place,
+chosen once at process start from the environment:
+
+- **Local file store (default).** `.run/gateway/data.json` (dir 0700, file 0600,
+  atomic tmp+rename writes). Used where there's a writable disk — dev, sandbox.
+- **Upstash Redis REST (serverless).** When BOTH `UPSTASH_REDIS_REST_URL` and
+  `UPSTASH_REDIS_REST_TOKEN` are set, the same doc is stored under the single
+  Redis key `onerouter:state` using plain fetch (`GET /get/<key>` to read,
+  `POST /set/<key>` with the JSON body to write; `Authorization: Bearer` with
+  the token). No SDK, no new dependencies. This is what runs on Vercel, where
+  the filesystem is ephemeral and read-only: every cold start re-hydrates the
+  same doc, so providers and the unified key survive restarts together.
+
+Rules:
+
+- Remote reads happen once per process (`ensureHydrated()`), then serve from an
+  in-memory cache; writes are awaited before the API replies (a fire-and-forget
+  write could be lost when a serverless function freezes after the response).
+- A missing remote key is treated as fresh state — first run generates and
+  persists the unified key, exactly like an empty file locally.
+- A configured-but-unreachable remote **fails loudly** (readable 500 / thrown
+  error). The gateway NEVER silently falls back to the file store when remote
+  is configured — that would split state between two places.
+- Half-configured (only one of the two env vars set) logs a warning and stays
+  on the file store.
 
 ## Config API (no auth — single-user MVP)
 

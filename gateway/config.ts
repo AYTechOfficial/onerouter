@@ -1,14 +1,43 @@
 // OneRouter gateway configuration.
 //
-// The gateway keeps its data (providers + the unified key) in .run/gateway/,
-// which is gitignored and denied by the vite dev server's fs allowlist, so it is
-// never served or committed. File permissions are hardened by store.ts (0600).
+// The gateway keeps its data (providers + the unified key) either in a local
+// file or in Upstash Redis, chosen at runtime by environment:
+//
+//  - Local file store (default): .run/gateway/data.json, gitignored and denied
+//    by the vite dev server's fs allowlist, so it is never served or committed.
+//    File permissions are hardened by store.ts (0600).
+//  - Upstash Redis REST (serverless): when BOTH UPSTASH_REDIS_REST_URL and
+//    UPSTASH_REDIS_REST_TOKEN are set, the whole state doc lives under a single
+//    Redis key instead of the local file — required on Vercel, where the
+//    filesystem is ephemeral/read-only and cold starts would otherwise lose
+//    every provider and the unified key. See store.ts and gateway/README.md.
 
 import { join } from "node:path";
 
 export const ROOT_DIR = join(import.meta.dir, "..");
 export const DATA_DIR = join(ROOT_DIR, ".run", "gateway");
 export const DATA_FILE = join(DATA_DIR, "data.json");
+
+// Upstash Redis REST backend (serverless persistence). Both must be non-empty
+// for remote mode to activate; neither is read from any committed file (they
+// come from the deployment environment, e.g. Vercel project env vars).
+export const REMOTE_URL = (process.env.UPSTASH_REDIS_REST_URL ?? "").trim().replace(/\/+$/, "");
+export const REMOTE_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN ?? "";
+// The single Redis key that holds the whole state doc (providers + unified key).
+export const REMOTE_KEY = "onerouter:state";
+
+export function isRemoteConfigured(): boolean {
+  const url = REMOTE_URL.length > 0;
+  const token = REMOTE_TOKEN.length > 0;
+  if (url !== token) {
+    // Half-configured: treat as local but say so — a real misconfiguration
+    // would otherwise silently split state between two backends.
+    console.warn(
+      "[onerouter] UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN must be set TOGETHER; falling back to the local file store",
+    );
+  }
+  return url && token;
+}
 
 export const UNIFIED_KEY_PREFIX = "sk-onerouter-";
 

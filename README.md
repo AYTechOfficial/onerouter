@@ -57,6 +57,14 @@ and `/v1/*` to it, everything else to the frontend).
 
 - `ONEROUTER_PUBLIC_ORIGIN` — overrides the public base URL reported by
   `/api/settings` (defaults to the deployed origin).
+- `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` — **persistent store on
+  serverless.** When both are set, the gateway keeps all state (providers + the
+  unified key) in Upstash Redis (single key `onerouter:state`, plain REST fetch)
+  instead of the local `.run/gateway/data.json` file. Required on Vercel, where
+  the filesystem is ephemeral and read-only: without these, every cold start
+  would lose your providers and regenerate the unified key. Locally, leaving
+  them unset keeps the file store. A configured-but-unreachable Upstash fails
+  loudly (readable 500) — it never silently falls back to the file store.
 - `MAX_ATTEMPTS`, `UPSTREAM_TIMEOUT_MS` — see `gateway/config.ts`.
 
 ## Repository layout
@@ -71,8 +79,10 @@ and `/v1/*` to it, everything else to the frontend).
 ## Runtime data (secrets) — not committed
 
 Provider API keys are stored at runtime in `.run/gateway/data.json` (dir 0700,
-file 0600, atomic writes) and are **never committed**: `.run/`, `.env*`,
+file 0600, atomic writes) or, when `UPSTASH_REDIS_REST_URL` /
+`UPSTASH_REDIS_REST_TOKEN` are set (serverless), in Upstash Redis under
+`onerouter:state` — and are **never committed**: `.run/`, `.env*`,
 `node_modules`, `dist/`, `.vercel/`, and the generated `src/routeTree.gen.ts`
 are all git-ignored. Check out a fresh clone, add your own providers, and you're
 off — nothing about your keys leaves the machine except through the unified
-endpoint you choose to use.
+endpoint you choose to use (and the remote store you explicitly configure).
